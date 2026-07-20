@@ -1,0 +1,61 @@
+# BioVision gAIt – requirements.txt
+# Markerless 3D Gait Analysis for Apple Silicon / M4
+# ================================================
+
+# --- Core dependencies (MeTRAbs pipeline) ---
+# These are required for the default MeTRAbs 3D pose backend.
+
+# MeTRAbs – Metric-scale Truncation-robust 3D Human Pose Estimation
+# https://github.com/isarandi/metrabs
+# 3D metric-scale pose, CPU-friendly, zero-shot, no camera calibration
+git+https://github.com/isarandi/metrabs.git
+
+opencv-python>=4.8.0
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Streamlit UI + plotting
+streamlit>=1.28.0
+plotly>=5.15.0
+
+# TensorFlow backend for MeTRAbs
+# Apple Silicon (M4) notes:
+#   pip install tensorflow-macos tensorflow-metal
+#   for MPS / GPU acceleration (experimental – CPU is reliable).
+# Linux / x86:
+#   pip install tensorflow
+#
+# MeTRAbs will auto-download model weights on first run.
+
+# --- Optional: COCO-WholeBody foot keypoint detail ---
+# For accurate calcaneal inversion/eversion (rearfoot angle) from rear-view video.
+# MeTRAbs H36M skeleton has no foot keypoints – RTMPose/WholeBody adds:
+#   heel, big toe, small toe (6 points per foot)
+#
+# Uncomment to enable foot-detail mode:
+# rtmlib>=1.0.0
+# onnxruntime>=1.15.0
+# # on Apple Silicon, use: onnxruntime-silicon
+
+# --- Optional: WHAM (SMPL mesh-based motion capture) ---
+# WHAM = "World-grounded Human with Accurate Motion"
+# https://github.com/yufu-wang/wham
+#
+# WHAM outputs: SMPL body mesh (6890 vertices), 24 body joints,
+#               global trajectory, foot-ground contact labels
+#
+# ⚠️  GPU RECOMMENDED (CUDA) – ~5-10x slower than MeTRAbs on CPU
+# ⚠️  Requires SMPL model files from http://smpl.is.tue.mpg.de/
+# ⚠️  On MacBook M4, MeTRAbs is the recommended default
+#
+# Uncomment to enable WHAM adapter (see wham_adapter.py):
+# torch>=2.0.0
+# torchvision>=0.15.0
+# # + pip install git+https://github.com/yufu-wang/wham.git
+# # + download SMPL model files → ./data/smpl/SMPL_NEUTRAL.pkl
+
+# --- Development / testing ---
+# pytest>=7.0.0
+# black>=23.0.0
+# ruff>=0.1.0

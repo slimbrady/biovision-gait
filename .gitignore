@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.conda/
+*.egg-info/
+dist/
+build/
+
+# Videos / media outputs
+*.mp4
+*.mov
+*.avi
+*.m4v
+*.mkv
+!example_*.mp4
+
+# Analysis outputs
+keypoints_*.json
+metrics_*.csv
+metrics_*.json
+summary_*.json
+overlay_*.mp4
+*.npz
+
+# Data / models
+data/
+*.pkl
+*.ckpt
+*.pth
+*.h5
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Streamlit
+.streamlit/
