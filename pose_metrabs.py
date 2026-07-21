@@ -1,17 +1,31 @@
-# pose_metrabs.py
-# BioVision gAIt – MeTRAbs 3D Pose Estimation Wrapper
-# Optimized for Apple Silicon (M4) – CPU / MPS inference, no CUDA required
-#
-# MeTRAbs (Metric-scale Truncation-robust Estimation of 3D Human Body Poses)
-# https://github.com/isarandi/metrabs
-# Paper: https://arxiv.org/abs/2207.08976
-#
-# Key advantages for gait analysis on M4:
-# - Metric-scale 3D joint positions (millimeters) – no camera calibration needed
-# - CPU-friendly backbones: EfficientNetV2-S / MobileNetV3
-# - Zero-shot inference – no per-subject training
-# - Outputs both 3D world coordinates and 2D pixel coordinates
-# - Fast batched inference (~15-30 FPS on M4 Pro CPU)
+#!/usr/bin/env python3
+"""
+pose_metrabs.py
+BioVision gAIt – MeTRAbs 3D Pose Estimation Wrapper
+Optimized for Apple Silicon (M4) – CPU inference
+
+MeTRAbs (Metric-scale Truncation-robust Estimation of 3D Human Body Poses)
+https://github.com/isarandi/metrabs
+
+Install:
+  pip install tensorflow tensorflow_hub opencv-python
+
+Usage via TensorFlow Hub (no git clone needed):
+  import tensorflow_hub as hub
+  model = hub.load('https://bit.ly/metrabs_l')  # EfficientNetV2-L
+  # or: https://bit.ly/metrabs_mob3  # MobileNetV3, fastest
+  pred = model.detect_poses(image_bgr, skeleton='h36m17')
+  # pred['poses3d'] -> (n_people, 17, 3) in mm
+  # pred['poses2d'] -> (n_people, 17, 2) in px
+
+H36M 17-joint skeleton (MeTRAbs output):
+  0: pelvis      6: ankle_l     12: elbow_l
+  1: hip_r       7: spine       13: wrist_l
+  2: knee_r      8: neck        14: shoulder_r
+  3: ankle_r     9: nose        15: elbow_r
+  4: hip_l       10: head       16: wrist_r
+  5: knee_l      11: shoulder_l
+"""
 
 import json
 import warnings
@@ -26,53 +40,31 @@ except ImportError:
     raise ImportError("opencv-python required: pip install opencv-python")
 
 # ---------------------------------------------------------------------------
-# MeTRAbs import – with RTMPose fallback for graceful degradation
+# MeTRAbs via TensorFlow Hub – with RTMPose fallback
 # ---------------------------------------------------------------------------
 
 METRABS_AVAILABLE = False
 RTMLIB_AVAILABLE = False
+_tfhub_model = None
 
 try:
-    import metrabs as mb
+    import tensorflow as tf
+    import tensorflow_hub as hub
     METRABS_AVAILABLE = True
 except ImportError:
     warnings.warn(
-        "MeTRAbs not installed. Install with: "
-        "pip install git+https://github.com/isarandi/metrabs.git\n"
+        "TensorFlow / tfhub not installed. "
+        "Install with: pip install tensorflow tensorflow_hub\n"
         "Falling back to RTMPose/rtmlib if available."
     )
     try:
-        from rtmlib import RTMPose, RTMDet
+        from rtmlib import RTMPose, YOLOX
         RTMLIB_AVAILABLE = True
     except ImportError:
         pass
 
 # ---------------------------------------------------------------------------
-# Joint definitions
-#
-# MeTRAbs outputs joints in H36M (Human3.6M) format by default.
-# H36M 17-joint skeleton (zero-indexed):
-#
-#   0:  Pelvis / Hip center
-#   1:  Right Hip
-#   2:  Right Knee
-#   3:  Right Ankle
-#   4:  Left Hip
-#   5:  Left Knee
-#   6:  Left Ankle
-#   7:  Spine / Thorax
-#   8:  Neck / Upper spine
-#   9:  Nose / Head
-#   10: Head top
-#   11: Left Shoulder
-#   12: Left Elbow
-#   13: Left Wrist
-#   14: Right Shoulder
-#   15: Right Elbow
-#   16: Right Wrist
-#
-# MeTRAbs 3D output is in millimeters, metric-scale, camera-relative.
-# +X = right, +Y = up, +Z = away from camera (right-handed)
+# Joint definitions – H36M 17
 # ---------------------------------------------------------------------------
 
 H36M_JOINT_NAMES = [
@@ -85,75 +77,82 @@ H36M_JOINT_NAMES = [
 
 H36M_IDX = {name: i for i, name in enumerate(H36M_JOINT_NAMES)}
 
-# COCO-WholeBody foot keypoints (for calcaneal inversion/eversion – rear view)
-# Only available if using RTMPose/WholeBody fallback
-# COCO-WholeBody adds 6 foot keypoints per foot:
-#   heel, big_toe, small_toe (+ 3 extra per foot)
-# These map to indices 23-28 in the 133-keypoint WholeBody format
-
 CameraView = Literal["sagittal", "frontal", "rear"]
+
+# MeTRAbs TF-Hub model URLs
+METRABS_MODELS = {
+    "efficientnetv2_l": "https://bit.ly/metrabs_l",      # best accuracy
+    "efficientnetv2_s": "https://bit.ly/metrabs_s",     # faster, good for M4
+    "mobilenetv3": "https://bit.ly/metrabs_mob3",       # fastest
+    # fallbacks – use _l if _s / mob3 404s
+}
 
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
-
 
 def load_metrabs_model(
     backend: str = "efficientnetv2_s",
     device: str = "auto"
 ) -> object:
     """
-    Load a MeTRAbs pose estimation model.
+    Load MeTRAbs via TensorFlow Hub.
 
     Args:
-        backend: Model backbone. Options:
-            - "efficientnetv2_s"  (default, good speed/accuracy on M4)
-            - "efficientnetv2_l"  (higher accuracy, slower)
-            - "mobilenetv3"       (fastest, lower accuracy)
-            - "resnet50"          (balanced)
-        device: "auto", "cpu", "cuda", "mps"
-            auto → tries MPS (Apple Silicon GPU) → CUDA → CPU
+        backend: "efficientnetv2_l" | "efficientnetv2_s" | "mobilenetv3"
+        device: ignored – TF handles CPU/MPS automatically
 
     Returns:
-        MeTRAbs model object ready for inference.
-
-    M4 / Apple Silicon notes:
-        - MeTRAbs runs fine on CPU on M4 (~15-30 FPS for EfficientNetV2-S)
-        - TensorFlow-Metal (MPS) support is experimental – CPU is reliable
-        - Batch frames for better throughput
+        TF-Hub model with .detect_poses() method
     """
+    global _tfhub_model
+    if _tfhub_model is not None:
+        return _tfhub_model
+
     if not METRABS_AVAILABLE:
         raise RuntimeError(
-            "MeTRAbs is not installed. Install with:\n"
-            "  pip install git+https://github.com/isarandi/metrabs.git"
+            "TensorFlow / tfhub not installed.\n"
+            "  pip install tensorflow tensorflow_hub"
         )
 
-    # MeTRAbs model zoo identifiers
-    # See: https://github.com/isarandi/metrabs#pre-trained-models
-    model_map = {
-        "efficientnetv2_s": "metrabs_mob3l_y4t",
-        "efficientnetv2_l": "metrabs_eff2l_y4",
-        "mobilenetv3": "metrabs_mob3l_y4t",
-        "resnet50": "metrabs_rn50_256d",
+    # Map backend names to TF-Hub URLs
+    url_map = {
+        "efficientnetv2_l": "https://bit.ly/metrabs_l",
+        "efficientnetv2_s": "https://bit.ly/metrabs_s",
+        "mobilenetv3": "https://bit.ly/metrabs_mob3",
+        "resnet50": "https://bit.ly/metrabs_l",  # fallback
     }
+    model_url = url_map.get(backend, "https://bit.ly/metrabs_eff2s_y4")
 
-    model_name = model_map.get(backend, "metrabs_mob3l_y4t")
+    print(f"[MeTRAbs] Loading from TF-Hub: {model_url}")
+    print("  (first run downloads ~80-300 MB – one time only)")
+    try:
+        model = hub.load(model_url)
+    except Exception as e:
+        # Try fallbacks
+        for fallback_url in [
+            "https://bit.ly/metrabs_l",
+            "https://bit.ly/metrabs_eff2s_y4",
+        ]:
+            if fallback_url == model_url:
+                continue
+            try:
+                print(f"  Trying fallback: {fallback_url}")
+                model = hub.load(fallback_url)
+                break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError(f"Could not load MeTRAbs model from TF-Hub: {e}")
 
-    print(f"[MeTRAbs] Loading model: {model_name} (backend={backend})")
-
-    # MeTRAbs loads via get_pose3d()
-    model = mb.create_pose3d(
-        model_name,
-        skeleton="h36m_17"  # Human3.6M 17-joint format
-    )
-
+    _tfhub_model = model
+    print("[MeTRAbs] Model loaded ✓")
     return model
 
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
-
 
 def run_metrabs_inference(
     video_path: str,
@@ -167,47 +166,8 @@ def run_metrabs_inference(
     """
     Run MeTRAbs 3D pose estimation on a gait video.
 
-    Args:
-        video_path: Path to input video (.mp4, .mov, .avi)
-        camera_view: "sagittal" | "frontal" | "rear"
-            Used to:
-            - Select which joint angles are computable
-            - Flip left/right labeling if needed (rear view)
-            - Annotate overlay video with view tag
-        model: Pre-loaded MeTRAbs model (optional – loads one if None)
-        backend: Model backend if loading a new model
-        conf_threshold: Minimum detection confidence (0-1)
-        output_dir: Where to save keypoints JSON + overlay MP4.
-            Defaults to same directory as video_path.
-        draw_overlay: Whether to generate pose overlay video
-
-    Returns:
-        {
-            "keypoints_3d": np.ndarray, shape (n_frames, 17, 3), mm
-            "keypoints_2d": np.ndarray, shape (n_frames, 17, 2), pixels
-            "confidences": np.ndarray, shape (n_frames, 17)
-            "fps": float,
-            "n_frames": int,
-            "camera_view": str,
-            "overlay_path": str | None,
-            "json_path": str | None,
-        }
-
-    Outputs:
-        - keypoints_<video>_<view>.json  – 3D + 2D keypoints per frame
-        - overlay_<video>_<view>.mp4     – skeleton overlay video
-
-    Camera view handling:
-        Sagittal (side):  Best for hip/knee/ankle flexion/extension,
-                          trunk flexion, shoulder/elbow, speed, cadence
-        Frontal (front):  Best for hip abd/add, stance width, trunk lean
-        Rear (back):     Best for calcaneal inversion/eversion,
-                          hip abd/add, stance width, foot strike pattern
-
-        The pose estimator itself is view-agnostic – it's the
-        downstream angle calculations that are view-dependent.
-        camera_view is stored as metadata and used by metrics_gait.py
-        to decide which angles to compute.
+    Returns dict with keypoints_3d (n_frames, 17, 3) in mm,
+    keypoints_2d (n_frames, 17, 2) in px, confidences, fps, etc.
     """
     video_path = Path(video_path)
     if not video_path.exists():
@@ -219,23 +179,27 @@ def run_metrabs_inference(
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Load model if needed ---
-    if model is None:
-        if METRABS_AVAILABLE:
+    # --- Load model / fallback ---
+    use_metrabs = METRABS_AVAILABLE
+    if model is None and use_metrabs:
+        try:
             model = load_metrabs_model(backend=backend)
-        elif RTMLIB_AVAILABLE:
+        except Exception as e:
+            print(f"[MeTRAbs] Load failed: {e}")
+            use_metrabs = False
+
+    if not use_metrabs:
+        if RTMLIB_AVAILABLE:
             print("[pose_metrabs] MeTRAbs unavailable – using RTMPose fallback")
             return _run_rtmpose_fallback(
                 str(video_path), camera_view, conf_threshold,
                 output_dir, draw_overlay
             )
-        else:
-            raise RuntimeError(
-                "No pose backend available. Install MeTRAbs:\n"
-                "  pip install git+https://github.com/isarandi/metrabs.git\n"
-                "Or RTMPose fallback:\n"
-                "  pip install rtmlib onnxruntime"
-            )
+        raise RuntimeError(
+            "No pose backend available.\n"
+            "Install MeTRAbs: pip install tensorflow tensorflow_hub\n"
+            "Or RTMPose fallback: pip install rtmlib onnxruntime"
+        )
 
     # --- Video I/O ---
     cap = cv2.VideoCapture(str(video_path))
@@ -246,7 +210,6 @@ def run_metrabs_inference(
 
     print(f"[{camera_view}] {video_path.name} – {n_frames_total} frames @ {fps:.1f} FPS, {width}x{height}")
 
-    # Overlay video writer
     overlay_writer = None
     overlay_path = None
     if draw_overlay:
@@ -260,144 +223,81 @@ def run_metrabs_inference(
     confidences_all = []
 
     frame_idx = 0
-    batch_size = 8  # batch for better M4 throughput
-    frame_buffer = []
-
-    def process_batch(frames_bgr: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
-        """Run MeTRAbs on a batch of BGR frames. Returns (poses3d, poses2d)."""
-        # MeTRAbs expects RGB, shape (N, H, W, 3)
-        batch_rgb = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr], axis=0)
-
-        # Run inference – returns dict with 'pose3d' key
-        # pose3d shape: (n_frames, n_people, n_joints, 3) in mm
-        pred = model.predict(batch_rgb)
-
-        poses3d = pred["poses3d"]  # (N, n_people, 17, 3)
-        # Take person 0 (closest / largest) if multiple detections
-        if poses3d.shape[1] > 0:
-            poses3d = poses3d[:, 0]  # (N, 17, 3)
-        else:
-            poses3d = np.zeros((len(frames_bgr), 17, 3), dtype=np.float32)
-
-        # 2D is not directly returned – project or use detector bboxes
-        # For simplicity, return dummy 2D (can be enhanced)
-        poses2d = np.zeros((len(frames_bgr), 17, 2), dtype=np.float32)
-
-        return poses3d, poses2d
-
-    # Actual MeTRAbs API varies by version – provide a robust wrapper
-    # If the above API doesn't match, fall back to per-frame inference:
-    use_batch = True
+    import tensorflow as tf
 
     while True:
-        ret, frame = cap.read()
+        ret, frame_bgr = cap.read()
         if not ret:
             break
 
-        frame_buffer.append(frame)
-        frame_idx += 1
+        # MeTRAbs TF-Hub: model.detect_poses(image, skeleton='h36m17')
+        # image: uint8 tensor [H, W, 3], BGR or RGB? – try BGR first, TF-Hub models usually expect RGB
+        # Docs say the model handles color internally, try RGB
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        img_tensor = tf.convert_to_tensor(frame_rgb, dtype=tf.uint8)
 
-        if len(frame_buffer) >= batch_size:
-            try:
-                if use_batch:
-                    poses3d_b, poses2d_b = process_batch(frame_buffer)
-                else:
-                    raise RuntimeError("force per-frame")
-            except Exception as e:
-                # Fall back to per-frame if batch API doesn't match installed version
-                if use_batch and frame_idx <= batch_size:
-                    print(f"[MeTRAbs] Batch API failed ({e}), switching to per-frame mode")
-                    use_batch = False
-
-                # Per-frame fallback using MeTRAbs public API
-                poses3d_b, poses2d_b = [], []
-                for fb in frame_buffer:
-                    rgb = cv2.cvtColor(fb, cv2.COLOR_BGR2RGB)
-                    try:
-                        pred = model.predict(rgb)
-                        p3d = pred.get("poses3d", pred.get("pose3d", np.zeros((1, 17, 3))))
-                        if p3d.ndim == 4:
-                            p3d = p3d[0, 0] if p3d.shape[1] > 0 else np.zeros((17, 3))
-                        elif p3d.ndim == 3:
-                            p3d = p3d[0] if p3d.shape[0] > 0 else np.zeros((17, 3))
-                        elif p3d.ndim == 2:
-                            pass  # already (17, 3)
-                        else:
-                            p3d = np.zeros((17, 3))
-                    except Exception:
-                        p3d = np.zeros((17, 3))
-                    poses3d_b.append(p3d)
-                    poses2d_b.append(np.zeros((17, 2), dtype=np.float32))
-                poses3d_b = np.stack(poses3d_b, axis=0)
-                poses2d_b = np.stack(poses2d_b, axis=0)
-
-            # Store results
-            for i in range(len(frame_buffer)):
-                keypoints_3d_all.append(poses3d_b[i])
-                keypoints_2d_all.append(poses2d_b[i])
-                confidences_all.append(np.ones(17, dtype=np.float32))  # MeTRAbs doesn't output per-joint conf
-
-                # Draw overlay
-                if overlay_writer is not None:
-                    vis = draw_skeleton_overlay(
-                        frame_buffer[i], poses2d_b[i], poses3d_b[i],
-                        camera_view=camera_view
-                    )
-                    overlay_writer.write(vis)
-
-            frame_buffer = []
-
-            if frame_idx % 60 == 0:
-                print(f"  ... frame {frame_idx}/{n_frames_total}")
-
-    # Flush remaining frames
-    if frame_buffer:
         try:
-            poses3d_b, poses2d_b = process_batch(frame_buffer)
-        except Exception:
-            poses3d_b = np.zeros((len(frame_buffer), 17, 3), dtype=np.float32)
-            poses2d_b = np.zeros((len(frame_buffer), 17, 2), dtype=np.float32)
-        for i in range(len(frame_buffer)):
-            keypoints_3d_all.append(poses3d_b[i] if i < len(poses3d_b) else np.zeros((17, 3)))
-            keypoints_2d_all.append(poses2d_b[i] if i < len(poses2d_b) else np.zeros((17, 2)))
-            confidences_all.append(np.ones(17, dtype=np.float32))
-            if overlay_writer is not None:
-                vis = draw_skeleton_overlay(
-                    frame_buffer[i],
-                    poses2d_b[i] if i < len(poses2d_b) else np.zeros((17, 2)),
-                    poses3d_b[i] if i < len(poses3d_b) else np.zeros((17, 3)),
-                    camera_view=camera_view
-                )
-                overlay_writer.write(vis)
+            pred = model.detect_poses(img_tensor, skeleton='h36m17')
+            # pred is dict: {'boxes', 'poses3d', 'poses2d'}
+            poses3d = pred['poses3d'].numpy()  # (n_people, 17, 3) mm
+            poses2d = pred['poses2d'].numpy()  # (n_people, 17, 2) px
+
+            if poses3d.shape[0] > 0:
+                kpt_3d = poses3d[0].astype(np.float32)
+                kpt_2d = poses2d[0].astype(np.float32)
+                conf = np.ones(17, dtype=np.float32)
+            else:
+                kpt_3d = np.zeros((17, 3), dtype=np.float32)
+                kpt_2d = np.zeros((17, 2), dtype=np.float32)
+                conf = np.zeros(17, dtype=np.float32)
+        except Exception as e:
+            if frame_idx == 0:
+                print(f"[MeTRAbs] Inference error: {e}")
+                print("  Check: pip install tensorflow tensorflow_hub")
+            kpt_3d = np.zeros((17, 3), dtype=np.float32)
+            kpt_2d = np.zeros((17, 2), dtype=np.float32)
+            conf = np.zeros(17, dtype=np.float32)
+
+        keypoints_3d_all.append(kpt_3d)
+        keypoints_2d_all.append(kpt_2d)
+        confidences_all.append(conf)
+
+        # Overlay
+        if overlay_writer is not None:
+            vis = draw_skeleton_overlay(frame_bgr, kpt_2d, kpt_3d, camera_view=camera_view)
+            overlay_writer.write(vis)
+
+        frame_idx += 1
+        if frame_idx % 30 == 0:
+            print(f"  ... frame {frame_idx}/{n_frames_total}")
 
     cap.release()
     if overlay_writer is not None:
         overlay_writer.release()
         print(f"Overlay saved: {overlay_path}")
 
-    keypoints_3d = np.stack(keypoints_3d_all, axis=0).astype(np.float32)
-    keypoints_2d = np.stack(keypoints_2d_all, axis=0).astype(np.float32)
-    confidences = np.stack(confidences_all, axis=0).astype(np.float32)
+    keypoints_3d = np.stack(keypoints_3d_all, axis=0).astype(np.float32) if keypoints_3d_all else np.zeros((0, 17, 3), np.float32)
+    keypoints_2d = np.stack(keypoints_2d_all, axis=0).astype(np.float32) if keypoints_2d_all else np.zeros((0, 17, 2), np.float32)
+    confidences = np.stack(confidences_all, axis=0).astype(np.float32) if confidences_all else np.zeros((0, 17), np.float32)
     n_frames = len(keypoints_3d_all)
 
-    # --- Save JSON ---
+    # Save JSON
     json_path = Path(output_dir) / f"keypoints_{video_path.stem}_{camera_view}.json"
-    keypoints_dict = {
-        "video": str(video_path),
-        "camera_view": camera_view,
-        "fps": float(fps),
-        "n_frames": int(n_frames),
-        "width": int(width),
-        "height": int(height),
-        "joint_names": H36M_JOINT_NAMES,
-        "keypoints_3d_mm": keypoints_3d.tolist(),
-        "keypoints_2d_px": keypoints_2d.tolist(),
-        "confidences": confidences.tolist(),
-        "backend": "metrabs",
-    }
     with open(json_path, "w") as f:
-        json.dump(keypoints_dict, f)
-    print(f"Keypoints saved: {json_path}")
+        json.dump({
+            "video": str(video_path),
+            "camera_view": camera_view,
+            "fps": float(fps),
+            "n_frames": int(n_frames),
+            "width": int(width),
+            "height": int(height),
+            "joint_names": H36M_JOINT_NAMES,
+            "keypoints_3d_mm": keypoints_3d.tolist(),
+            "keypoints_2d_px": keypoints_2d.tolist(),
+            "confidences": confidences.tolist(),
+            "backend": "metrabs_tfhub",
+        }, f)
+    print(f"Keypoints saved: {json_path}  ({n_frames} frames)")
 
     return {
         "keypoints_3d": keypoints_3d,
@@ -434,32 +334,24 @@ H36M_SKELETON_EDGES = [
     (H36M_IDX["elbow_r"], H36M_IDX["wrist_r"]),
 ]
 
-
 def draw_skeleton_overlay(
     frame_bgr: np.ndarray,
     kpts_2d: np.ndarray,
     kpts_3d: np.ndarray,
     camera_view: CameraView = "sagittal",
 ) -> np.ndarray:
-    """
-    Draw 3D skeleton overlay on a video frame.
-
-    If 2D keypoints are all zeros (MeTRAbs 3D-only mode),
-    project 3D keypoints orthographically for visualization.
-
-    Camera view tag is rendered in the top-left corner.
-    """
+    """Draw 3D skeleton overlay on a video frame."""
     vis = frame_bgr.copy()
     h, w = vis.shape[:2]
 
-    # If 2D is missing, project 3D orthographically
+    # If 2D is all zeros, project 3D orthographically
     if np.all(kpts_2d == 0) and np.any(kpts_3d != 0):
-        # Simple orthographic projection: drop Z, scale to image
         pts = kpts_3d.copy().astype(np.float32)
-        # Center and scale to fit
         valid = np.linalg.norm(pts, axis=1) > 1
         if np.any(valid):
             pts_valid = pts[valid]
+            # MeTRAbs 3D: X=right, Y=up, Z=away
+            # Project X/Y to image
             x_min, x_max = pts_valid[:, 0].min(), pts_valid[:, 0].max()
             y_min, y_max = pts_valid[:, 1].min(), pts_valid[:, 1].max()
             scale = min(w * 0.6 / max(x_max - x_min, 1),
@@ -469,7 +361,7 @@ def draw_skeleton_overlay(
             kpts_2d[valid, 0] = cx + (pts[valid, 0] - pts_valid[:, 0].mean()) * scale
             kpts_2d[valid, 1] = cy - (pts[valid, 1] - pts_valid[:, 1].mean()) * scale
 
-    # Draw skeleton edges
+    # Draw bones
     for a, b in H36M_SKELETON_EDGES:
         xa, ya = kpts_2d[a]
         xb, yb = kpts_2d[b]
@@ -480,7 +372,7 @@ def draw_skeleton_overlay(
     # Draw joints
     for i, (x, y) in enumerate(kpts_2d):
         if x == 0 and y == 0: continue
-        color = (0, 200, 255) if i in [1,2,3,14,15,16] else (255, 180, 0)  # R vs L
+        color = (0, 200, 255) if i in [1,2,3,14,15,16] else (255, 180, 0)
         cv2.circle(vis, (int(x), int(y)), 4, color, -1)
 
     # View tag
@@ -488,12 +380,11 @@ def draw_skeleton_overlay(
     cv2.rectangle(vis, (10, 10), (150, 45), (0, 0, 0), -1)
     cv2.putText(vis, camera_view.upper(), (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, view_colors.get(camera_view, (255,255,255)), 2)
-
     return vis
 
 
 # ---------------------------------------------------------------------------
-# RTMPose / rtmlib fallback (for foot keypoint detail – COCO-WholeBody)
+# RTMPose / rtmlib fallback
 # ---------------------------------------------------------------------------
 
 def _run_rtmpose_fallback(
@@ -503,99 +394,122 @@ def _run_rtmpose_fallback(
     output_dir: Path,
     draw_overlay: bool,
 ) -> Dict:
+    """Fallback pose estimation using RTMPose via rtmlib.
+    Returns 2D keypoints only – Z=0. Compatible with metrics_gait.py
+    (angles computed in 2D, with view-appropriate plane selection).
     """
-    Fallback pose estimation using RTMPose via rtmlib.
-
-    RTMPose provides COCO-WholeBody keypoints (133 points), including
-    detailed foot keypoints useful for calcaneal inversion/eversion
-    analysis in rear-view gait.
-
-    Foot keypoints in COCO-WholeBody (indices):
-      23: left heel
-      24: left big toe
-      25: left small toe
-      26: right heel
-      27: right big toe
-      28: right small toe
-
-    These 6 points per foot enable rearfoot angle / calcaneal
-    inversion-eversion estimation in the frontal plane.
-
-    Returns 2D keypoints only – no metric 3D. Z = 0.
-    """
-    from rtmlib import RTMPose, RTMDet, YOLOX, YOLOv8
-
-    print(f"[RTMPose fallback] {video_path} – view={camera_view}")
-
-    # Load detector + pose model
-    # rtmlib auto-downloads ONNX weights on first run
     try:
-        detector = RTMDet(model="rtmdet_m_640", device="cpu")
-        pose_model = RTMPose(model="rtmw-x", backend="onnxruntime", device="cpu")
-    except Exception:
-        # Try smaller models
-        detector = YOLOX(model="yolox_l", backend="onnxruntime", device="cpu")
-        pose_model = RTMPose(model="rtmpose-l", backend="onnxruntime", device="cpu")
+        from rtmlib import PoseTracker, Body, draw_skeleton
+    except ImportError:
+        raise RuntimeError("rtmlib not installed – pip install rtmlib onnxruntime")
+
+    print(f"[RTMPose fallback] {video_path}  view={camera_view}")
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    pose_tracker = PoseTracker(
+        Body, mode='balanced',
+        backend='onnxruntime', device='cpu'
+    )
+
     overlay_writer = None
     overlay_path = None
     if draw_overlay:
         overlay_path = output_dir / f"overlay_{Path(video_path).stem}_{camera_view}_rtmpose.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        overlay_writer = cv2.VideoWriter(str(overlay_path), fourcc, fps, (width, height))
+        overlay_writer = cv2.VideoWriter(str(overlay_path),
+            cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
-    keypoints_2d_all = []
+    # RTMPose COCO-17 → H36M 17 mapping
+    # COCO: 0 nose,1 L_eye,2 R_eye,3 L_ear,4 R_ear,
+    # 5 L_shoulder, 6 R_shoulder, 7 L_elbow, 8 R_elbow,
+    # 9 L_wrist, 10 R_wrist, 11 L_hip, 12 R_hip,
+    # 13 L_knee, 14 R_knee, 15 L_ankle, 16 R_ankle
+    # H36M: 0 pelvis, 1 hip_r, 2 knee_r, 3 ankle_r,
+    #  4 hip_l, 5 knee_l, 6 ankle_l, 7 spine, 8 neck,
+    #  9 nose, 10 head, 11 shoulder_l, 12 elbow_l, 13 wrist_l,
+    #  14 shoulder_r, 15 elbow_r, 16 wrist_r
+    coco_to_h36m = [
+        11,  # 0 pelvis <- avg L/R hip
+        12,  # 1 hip_r <- R_hip (12)
+        14,  # 2 knee_r <- R_knee (14)
+        16,  # 3 ankle_r <- R_ankle (16)
+        11,  # 4 hip_l <- L_hip (11)
+        13,  # 5 knee_l <- L_knee (13)
+        15,  # 6 ankle_l <- L_ankle (15)
+        5,   # 7 spine <- avg shoulders
+        5,   # 8 neck <- avg shoulders
+        0,   # 9 nose <- nose
+        0,   # 10 head <- nose
+        5,   # 11 shoulder_l <- L_shoulder
+        7,   # 12 elbow_l <- L_elbow
+        9,   # 13 wrist_l <- L_wrist
+        6,   # 14 shoulder_r <- R_shoulder
+        8,   # 15 elbow_r <- R_elbow
+        10,  # 16 wrist_r <- R_wrist
+    ]
+
+    kpts_2d_all = []
     frame_idx = 0
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
-        bboxes = detector(frame)
-        keypoints, scores = pose_model(frame, bboxes=bboxes)
-
-        if len(keypoints) > 0:
-            kpts = keypoints[0]  # (133, 2) for WholeBody
-            # Map COCO-WholeBody to H36M 17 for compatibility
-            # This is a rough mapping – only core body joints
-            kpts_h36m_2d = np.zeros((17, 2), dtype=np.float32)
-            # COCO indices: 5=L_shoulder, 6=R_shoulder, 7=L_elbow, 8=R_elbow,
-            # 9=L_wrist, 10=R_wrist, 11=L_hip, 12=R_hip,
-            # 13=L_knee, 14=R_knee, 15=L_ankle, 16=R_ankle
-            # ... mapping omitted for brevity, fill with 0s if no match
-            # Store full WholeBody in extra field
+        keypoints, scores = pose_tracker(frame)
+        if keypoints is not None and len(keypoints) > 0:
+            kp_coco = keypoints[0]  # (17, 2)
+            # Map COCO → H36M
+            h36m_2d = np.zeros((17, 2), dtype=np.float32)
+            # Direct 1:1 mappings
+            mapping = {
+                1: 12, 2: 14, 3: 16,   # R hip/knee/ankle
+                4: 11, 5: 13, 6: 15,   # L hip/knee/ankle
+                11: 5, 12: 7, 13: 9,   # L shoulder/elbow/wrist
+                14: 6, 15: 8, 16: 10,  # R shoulder/elbow/wrist
+            }
+            for h36m_i, coco_i in mapping.items():
+                if coco_i < kp_coco.shape[0]:
+                    h36m_2d[h36m_i] = kp_coco[coco_i]
+            # pelvis = avg hips
+            h36m_2d[0] = (h36m_2d[1] + h36m_2d[4]) / 2
+            # spine/neck = avg shoulders
+            shoulder_mid = (h36m_2d[11] + h36m_2d[14]) / 2
+            h36m_2d[7] = shoulder_mid
+            h36m_2d[8] = shoulder_mid
+            # nose/head
+            if kp_coco.shape[0] > 0:
+                h36m_2d[9] = kp_coco[0]
+                h36m_2d[10] = kp_coco[0]
         else:
-            kpts_h36m_2d = np.zeros((17, 2), dtype=np.float32)
-            kpts = np.zeros((133, 2), dtype=np.float32)
+            h36m_2d = np.zeros((17, 2), dtype=np.float32)
 
-        keypoints_2d_all.append(kpts_h36m_2d)
+        kpts_2d_all.append(h36m_2d)
 
         if overlay_writer is not None:
             vis = frame.copy()
-            if len(keypoints) > 0:
-                for x, y in keypoints[0]:
-                    if x > 0 and y > 0:
-                        cv2.circle(vis, (int(x), int(y)), 2, (0, 255, 0), -1)
+            if keypoints is not None and len(keypoints) > 0:
+                try:
+                    vis = draw_skeleton(vis, keypoints, scores, kpt_thr=conf_threshold)
+                except Exception:
+                    for x, y in keypoints[0]:
+                        if x > 0 and y > 0:
+                            cv2.circle(vis, (int(x), int(y)), 3, (0, 255, 0), -1)
             cv2.putText(vis, f"{camera_view.upper()} – RTMPose", (20, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             overlay_writer.write(vis)
-
         frame_idx += 1
 
     cap.release()
     if overlay_writer:
         overlay_writer.release()
 
-    kpts_2d = np.stack(keypoints_2d_all, axis=0) if keypoints_2d_all else np.zeros((0, 17, 2))
+    kpts_2d = np.stack(kpts_2d_all, axis=0) if kpts_2d_all else np.zeros((0, 17, 2), np.float32)
     n_frames = kpts_2d.shape[0]
     kpts_3d = np.zeros((n_frames, 17, 3), dtype=np.float32)
-    kpts_3d[:, :, :2] = kpts_2d  # copy X,Y, Z=0
+    kpts_3d[:, :, :2] = kpts_2d
     conf = np.ones((n_frames, 17), dtype=np.float32)
 
     json_path = output_dir / f"keypoints_{Path(video_path).stem}_{camera_view}_rtmpose.json"
@@ -605,6 +519,8 @@ def _run_rtmpose_fallback(
             "camera_view": camera_view,
             "fps": float(fps),
             "n_frames": int(n_frames),
+            "width": int(width),
+            "height": int(height),
             "joint_names": H36M_JOINT_NAMES,
             "keypoints_3d_mm": kpts_3d.tolist(),
             "keypoints_2d_px": kpts_2d.tolist(),
@@ -625,34 +541,20 @@ def _run_rtmpose_fallback(
 
 
 # ---------------------------------------------------------------------------
-# Multi-view batch processing
+# Multi-view batch
 # ---------------------------------------------------------------------------
 
 def run_multiview_inference(
     videos: Dict[CameraView, str],
     **kwargs
 ) -> Dict[CameraView, Dict]:
-    """
-    Process 1-3 videos from different camera views.
-
-    Args:
-        videos: Dict mapping camera_view → video_path
-            e.g. {"sagittal": "run_side.mp4", "frontal": "run_front.mp4"}
-
-    Returns:
-        Dict mapping camera_view → inference result dict
-    """
+    """Process 1-3 videos from different camera views."""
     results = {}
-    model = None
-    if METRABS_AVAILABLE:
-        model = load_metrabs_model(backend=kwargs.get("backend", "efficientnetv2_s"))
-
     for view, video_path in videos.items():
         print(f"\n{'='*60}\nProcessing {view} view: {video_path}\n{'='*60}")
         results[view] = run_metrabs_inference(
-            video_path, camera_view=view, model=model, **kwargs
+            video_path, camera_view=view, **kwargs
         )
-
     return results
 
 
@@ -662,16 +564,14 @@ def run_multiview_inference(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="BioVision gAIt – MeTRAbs 3D Pose Estimation")
+    parser = argparse.ArgumentParser(description="BioVision gAIt – MeTRAbs 3D Pose")
     parser.add_argument("video", help="Input video file")
     parser.add_argument("--view", choices=["sagittal", "frontal", "rear"],
                         default="sagittal", help="Camera view")
     parser.add_argument("--backend", default="efficientnetv2_s",
-                        help="Model backend")
-    parser.add_argument("--output-dir", "-o", default=None,
-                        help="Output directory")
-    parser.add_argument("--no-overlay", action="store_true",
-                        help="Skip overlay video generation")
+                        help="efficientnetv2_l | efficientnetv2_s | mobilenetv3")
+    parser.add_argument("--output-dir", "-o", default=None)
+    parser.add_argument("--no-overlay", action="store_true")
     args = parser.parse_args()
 
     run_metrabs_inference(
