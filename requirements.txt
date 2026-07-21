@@ -37,6 +37,11 @@ plotly>=5.15.0
 # rtmlib>=1.0.0
 # onnxruntime>=1.15.0
 # # on Apple Silicon, use: onnxruntime-silicon
+# # NOTE: rtmlib's YOLO detector backend requires ultralytics, which is
+# #       NOT listed in rtmlib's own requirements. If you get
+# #       `ImportError: cannot import name 'YOLOv8' from 'rtmlib'`,
+# #       install it explicitly:
+# # ultralytics>=8.0.0
 
 # --- Optional: WHAM (SMPL mesh-based motion capture) ---
 # WHAM = "World-grounded Human with Accurate Motion"

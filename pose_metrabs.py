@@ -47,6 +47,7 @@ METRABS_AVAILABLE = False
 RTMLIB_AVAILABLE = False
 _tfhub_model = None
 
+# TensorFlow / MeTRAbs backend
 try:
     import tensorflow as tf
     import tensorflow_hub as hub
@@ -57,11 +58,18 @@ except ImportError:
         "Install with: pip install tensorflow tensorflow_hub\n"
         "Falling back to RTMPose/rtmlib if available."
     )
-    try:
-        from rtmlib import RTMPose, YOLOX
-        RTMLIB_AVAILABLE = True
-    except ImportError:
-        pass
+
+# RTMPose / rtmlib fallback backend
+# Import via submodule paths to bypass rtmlib/__init__.py, which in some
+# versions pulls in YOLOv8 / ultralytics (not listed in rtmlib deps).
+try:
+    from rtmlib.tools.solution.pose_tracker import PoseTracker  # noqa: F401
+    from rtmlib.tools.solution.body import Body  # noqa: F401
+    from rtmlib.visualization.draw import draw_skeleton  # noqa: F401
+    RTMLIB_AVAILABLE = True
+except ImportError:
+    # rtmlib not installed – fallback unavailable
+    pass
 
 # ---------------------------------------------------------------------------
 # Joint definitions – H36M 17
@@ -399,9 +407,24 @@ def _run_rtmpose_fallback(
     (angles computed in 2D, with view-appropriate plane selection).
     """
     try:
-        from rtmlib import PoseTracker, Body, draw_skeleton
-    except ImportError:
-        raise RuntimeError("rtmlib not installed – pip install rtmlib onnxruntime")
+        # Import via submodule paths to bypass rtmlib/__init__.py,
+        # which in some versions imports YOLOv8 / ultralytics.
+        from rtmlib.tools.solution.pose_tracker import PoseTracker
+        from rtmlib.tools.solution.body import Body
+        from rtmlib.visualization.draw import draw_skeleton
+    except ImportError as e:
+        # rtmlib < 0.0.16 may need ultralytics for YOLOv8 detector backend
+        if "ultralytics" in str(e).lower() or "yolov8" in str(e).lower():
+            raise RuntimeError(
+                "rtmlib import failed due to missing ultralytics / YOLOv8: "
+                f"{e}\n"
+                "Fix: pip install ultralytics\n"
+                "(rtmlib's YOLO detector backend depends on ultralytics, "
+                "but it's not listed in rtmlib's requirements)"
+            ) from e
+        raise RuntimeError(
+            "rtmlib not installed – pip install rtmlib onnxruntime"
+        ) from e
 
     print(f"[RTMPose fallback] {video_path}  view={camera_view}")
 
