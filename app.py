@@ -11,6 +11,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import inference
+print("INFERENCE FILE:", inference.__file__)
+
 from pose_metrabs import run_multiview_inference, run_metrabs_inference
 from metrics_gait import (
     analyze_gait, compute_all_joint_angles,
