@@ -149,6 +149,10 @@ if run_btn:
                     output_dir=str(tmpdir),
                     draw_overlay=True,
                 )
+                kpts_3d = pose_result["keypoints_3d"]
+                st.session_state['kpts_np'] = kpts_3d
+                st.session_state['inference_fps'] = pose_result["fps"]
+                st.session_state['video_path_str'] = str(tmp_video)
             except Exception as e:
                 st.error(f"Pose estimation failed: {e}")
                 st.stop()
@@ -422,6 +426,9 @@ st.caption("Clinical thresholds are general screening values. "
            "Consult a qualified clinician for diagnosis. "
            "Calcaneal eversion is ESTIMATED from ankle mediolateral sway "
            "when using MeTRAbs – use RTMPose/WholeBody for true rearfoot angle.")
+
+engine="metrabs",
+model_version="efficientnetv2_s",
 
 # ---------------------------------------------------------------------------
 # Downloads
