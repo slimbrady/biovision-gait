@@ -301,11 +301,33 @@ biovision-gait/
 
 ## 📚 References
 
+### Core pose models
+
 - **MeTRAbs** – Sárándi et al. "MeTRAbs: Metric-Scale Truncation-Robust Estimation of 3D Human Body Poses". ECCV 2022. https://arxiv.org/abs/2207.08976
+- **WHAM** – Wang et al. "WHAM: Reconstructing World-Grounded Humans with Accurate 3D Motion". CVPR 2024. https://arxiv.org/abs/2312.07531
+
+### Markerless gait validation – 3D / clinical ROM
+
+1. **Chougule et al. 2026** – "Accuracy and Validity of 3D Markerless Motion Capture Compared to Marker-Based Systems for Lower-Limb Biomechanical Assessment: A Systematic Review". *Sensors* 26(12):3956. https://doi.org/10.3390/s26123956  
+   *Systematic review validating markerless vs marker-based 3D motion capture for hip/knee/ankle ROM – supports the MeTRAbs metric-scale pose pipeline used here for joint angle extraction.*
+
+2. **Çabuk et al. 2025** – "Can OpenCap deliver valid and reliable kinematic data for motion analysis? A systematic review and three-level meta-analysis". *Biocybernetics and Biomedical Engineering*, 2025.  
+   *Meta-analysis of smartphone-based markerless gait kinematics (OpenCap) – validates single-camera clinical screening workflows similar to BioVision's M4-native pipeline.*
+
+3. **D'Souza et al. 2024** – "A comparison of lower body gait kinematics and kinetics between Theia3D markerless and marker-based models in healthy subjects and clinical patients". *Sci Rep* 14, 80499. https://doi.org/10.1038/s41598-024-80499-8  
+   *Theia3D vs Vicon head-to-head for 3D hip/knee/ankle ROM and pelvic/trunk angles in healthy + clinical cohorts – supports frontal-plane metrics (hip abd/add, pelvic obliquity, trunk lean).*
+
+4. **Wren et al. 2023** – "Comparison of kinematics between Theia markerless and conventional marker-based gait analysis in clinical patients". *Gait & Posture* 106:1-7. https://doi.org/10.1016/j.gaitpost.2023.05.029  
+   *Vicon vs Theia3D concurrent-validity in 36 pediatric clinical gait patients – explicitly reports ankle inversion, foot progression angle, and transverse-plane rotation – validates the calcaneal inversion/eversion and foot progression modules (RTMPose/WholeBody backend).*
+
+5. **Cao et al. 2026** – "Validation of a Markerless Non-Contact Gait Analysis System for Three-Dimensional Gait Kinematics in Patients with Ankle Injuries: A Concurrent Comparison Study with the Vicon Three-Dimensional Motion Capture System". *Sensors* 26(14):4579.  
+   *Vicon-validated 3D markerless gait kinematics in ankle-injury patients – strongest direct validation for the ankle dorsiflexion/plantarflexion ROM pipeline used in BioVision gAIt.*
+
+### Additional references
+
 - **VisionMD-Gait** – Stenum et al. "Vision-based gait analysis: validation of a markerless approach". 2023.
 - **Ali et al. 2024** – "Markerless motion capture for clinical gait analysis: a systematic review"
 - **Washabaugh et al. 2022** – "Validity and repeatability of inertial measurement units for measuring running gait parameters"
-- **WHAM** – Wang et al. "WHAM: Reconstructing World-Grounded Humans with Accurate 3D Motion". CVPR 2024. https://arxiv.org/abs/2312.07531
 
 ---
 
@@ -322,7 +344,7 @@ If you use BioVision gAIt in research, please cite MeTRAbs:
 ```bibtex
 @inproceedings{sarandi2022metrabs,
   title={MeTRAbs: Metric-Scale Truncation-Robust Estimation of 3D Human Body Poses},
-  author={S{\'a}r{\'a}ndi, Istv{\'a}n and Hermans, Alexander and Leibe, Bastian},
+  author={S{\\'a}r{\\'a}ndi, Istv{\\'a}n and Hermans, Alexander and Leibe, Bastian},
   booktitle={ECCV},
   year={2022}
 }
