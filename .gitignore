@@ -49,3 +49,8 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
+
+# Secrets
+service_account.json
+.env
+secrets.toml
